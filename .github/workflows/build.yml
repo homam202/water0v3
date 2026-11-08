@@ -1,0 +1,83 @@
+name: Build GeoPulse APK
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # Android folder is generated here, so no terminal is needed on your PC
+      - name: Generate Android project
+        run: |
+          mkdir -p lib
+          if [ ! -f lib/main.dart ] && [ -f main.dart ]; then mv main.dart lib/main.dart; fi
+          if [ ! -f lib/main.dart ]; then echo "ERROR: lib/main.dart not found in repository"; exit 1; fi
+          mkdir -p assets/icon
+          for f in app_icon.png app_icon_fg.png logo.png; do
+            if [ ! -f assets/icon/$f ] && [ -f $f ]; then mv $f assets/icon/$f; fi
+          done
+          cp -r lib /tmp/lib_backup
+          cp pubspec.yaml /tmp/pubspec_backup.yaml
+          flutter create --platforms=android --project-name geopulse --org com.geopulse .
+          rm -rf lib && cp -r /tmp/lib_backup lib
+          cp /tmp/pubspec_backup.yaml pubspec.yaml
+          rm -rf test
+
+      - name: Add Bluetooth permissions
+        run: |
+          python3 - <<'PY'
+          p = 'android/app/src/main/AndroidManifest.xml'
+          s = open(p).read()
+          perms = '''<uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+              '''
+          s = s.replace('<application', perms + '<application', 1)
+          open(p, 'w').write(s)
+          PY
+
+      - name: Raise compileSdk to 36
+        run: |
+          for f in android/app/build.gradle.kts android/app/build.gradle; do
+            if [ -f "$f" ]; then
+              sed -i -E 's/compileSdk(Version)? *=? *flutter\.compileSdkVersion/compileSdk = 36/' "$f"
+              grep -n "compileSdk" "$f" || true
+            fi
+          done
+
+      - run: flutter pub get
+
+      - name: Generate launcher icons
+        run: dart run flutter_launcher_icons
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GeoPulse-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Publish GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/app/outputs/flutter-apk/app-release.apk
